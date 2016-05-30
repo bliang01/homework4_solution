@@ -86,7 +86,7 @@ void heat_parallel(double* uk, double dx, size_t Nx, double dt, size_t Nt,
 {
   // get information about the MPI environment and create spaces for Status and
   // Request information (if needed)
-  MPI_Request req;
+  MPI_Request req_left, req_right;
   int rank, size;
   MPI_Comm_rank(comm, &rank);
   MPI_Comm_size(comm, &size);
@@ -125,28 +125,39 @@ void heat_parallel(double* uk, double dx, size_t Nx, double dt, size_t Nt,
       left_ghost[0] = ukt[0];
       right_ghost[0] = ukt[Nx-1];
 
-      //printf("[%d->%d] left_ghost->right_ghost\n", rank, left_proc);
-      MPI_Send(&left_ghost[0], 1, MPI_DOUBLE, left_proc, 0, comm);
-      MPI_Recv(&right_ghost[1], 1, MPI_DOUBLE, right_proc, 0, comm,
-               MPI_STATUS_IGNORE);
+      // First note about interleaving communication and computation when
+      // the send is asynchronous: send data as soon as possible so that
+      // no other task has to wait on this one.
+      MPI_Isend(&left_ghost[0], 1, MPI_DOUBLE, left_proc, 0, comm, &req_left);
+      MPI_Isend(&right_ghost[0], 1, MPI_DOUBLE, right_proc, 0, comm, &req_right);
 
-      //printf("[%d->%d] right_ghost->left_ghost\n", rank, right_proc);
-      MPI_Isend(&right_ghost[0], 1, MPI_DOUBLE, right_proc, 0, comm, &req);
-      MPI_Recv(&left_ghost[1], 1, MPI_DOUBLE, left_proc, 0, comm,
-               MPI_STATUS_IGNORE);
-
-      // update local data using Forward Euler
-      //printf("[%d] forward euler\n", rank);
+      // update internal local data using Forward Euler
       for (size_t i=1; i<(Nx-1); ++i)
         uktp1[i] = ukt[i] + nu*(ukt[i-1] - 2*ukt[i] + ukt[i+1]);
-      uktp1[0] = ukt[0] + nu*(left_ghost[1] - 2*ukt[0] + ukt[1]);
+
+      // Second note: wait as late as possible to receive the data, so that
+      // the task sending the data is likely to have already posted it.
+
+      // handle right boundary
+      MPI_Recv(&right_ghost[1], 1, MPI_DOUBLE, right_proc, 0, comm,
+               MPI_STATUS_IGNORE);
       uktp1[Nx-1] = ukt[Nx-1] + nu*(ukt[Nx-2] - 2*ukt[Nx-1] + right_ghost[1]);
+
+      // handle left boundary
+      MPI_Recv(&left_ghost[1], 1, MPI_DOUBLE, left_proc, 0, comm,
+               MPI_STATUS_IGNORE);
+      uktp1[0] = ukt[0] + nu*(left_ghost[1] - 2*ukt[0] + ukt[1]);
 
       // local iterate
       temp = ukt;
       ukt = uktp1;
       uktp1 = temp;
-      MPI_Wait(&req, MPI_STATUS_IGNORE);
+
+      // Use `MPI_Wait` as late as possible, in this case right before we
+      // reuse the ghost cells (at the top of the loop in the next
+      // iteration).
+      MPI_Wait(&req_left, MPI_STATUS_IGNORE);
+      MPI_Wait(&req_right, MPI_STATUS_IGNORE);
     }
   /*
     END REMOVAL ZONE
