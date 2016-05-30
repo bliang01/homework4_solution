@@ -86,7 +86,6 @@ void heat_parallel(double* uk, double dx, size_t Nx, double dt, size_t Nt,
 {
   // get information about the MPI environment and create spaces for Status and
   // Request information (if needed)
-  MPI_Status stat;
   MPI_Request req;
   int rank, size;
   MPI_Comm_rank(comm, &rank);
@@ -147,6 +146,7 @@ void heat_parallel(double* uk, double dx, size_t Nx, double dt, size_t Nt,
       temp = ukt;
       ukt = uktp1;
       uktp1 = temp;
+      MPI_Wait(&req, MPI_STATUS_IGNORE);
     }
   /*
     END REMOVAL ZONE
